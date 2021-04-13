@@ -1,3 +1,4 @@
+
 package AI;
 
 import Game.Game;
@@ -6,8 +7,12 @@ import Test.Pair;
 import board.Location;
 import piece.Tool;
 import Game.Moves.MoveStatus;
-import Game.AllianceColor;
 import Game.GameLogic;
+
+import java.util.*;
+import java.util.concurrent.ForkJoinPool;
+import java.util.concurrent.ForkJoinTask;
+import java.util.concurrent.RecursiveTask;
 
 
 public class MinMax implements MoveStrategy {
@@ -26,9 +31,9 @@ public class MinMax implements MoveStrategy {
         Location srcLocation = null;
         Location dstLocation = null;
         int highestSeenValue = Integer.MIN_VALUE;
-        int lowestSeenValue = Integer.MAX_VALUE;
-        int currentValue;
+        OptionalInt currentValue;
         Game copyOfGame;
+        ForkJoinPool forkJoinPool = new ForkJoinPool();
         Player currentPlayer = game.getCurrentPlayer();
         System.out.println(currentPlayer + " THINKING with depth = " + this.searchDepth);
         for (Tool tool : currentPlayer.getPieces()) {
@@ -38,17 +43,9 @@ public class MinMax implements MoveStrategy {
                 MoveStatus moveStatus = copyOfGame.getMoveManager().makeMove(src, dst, copyOfGame.getCurrentPlayer());
                 if (moveStatus.isDone()) {
                     copyOfGame.switchTurn();
-                    currentValue = currentPlayer.getColor().equals(AllianceColor.White) ?
-                            min(new Game(copyOfGame), this.searchDepth - 1) :
-                            max(new Game(copyOfGame), this.searchDepth - 1);
-                    if (currentPlayer.getColor().equals(AllianceColor.White) &&
-                            currentValue >= highestSeenValue) {
-                        highestSeenValue = currentValue;
-                        srcLocation = src;
-                        dstLocation = dst;
-                    } else if (currentPlayer.getColor().equals(AllianceColor.Black) &&
-                            currentValue <= lowestSeenValue) {
-                        lowestSeenValue = currentValue;
+                    currentValue =  forkJoinPool.invoke(new Min(new Game(copyOfGame), this.searchDepth - 1,this.evaluator));
+                    if (currentValue.isPresent() && currentValue.getAsInt() >= highestSeenValue) {
+                        highestSeenValue = currentValue.getAsInt();
                         srcLocation = src;
                         dstLocation = dst;
                     }
@@ -62,58 +59,82 @@ public class MinMax implements MoveStrategy {
     private static boolean isEndGameScenario(Game game) {
         return GameLogic.isCheckMate(game.getBoard(), game.getCurrentPlayer());
     }
+    public class Min extends RecursiveTask<OptionalInt> {
+        final Game game;
+        final int depth;
+        final BoardEvaluator evaluator;
 
-    private int min(final Game game,
-                    final int depth) {
-        Game copyOfGame;
-        if (depth == 0 || isEndGameScenario(game)) {
-            return this.evaluator.evaluate(game, depth);
+        public Min(Game game,int depth,BoardEvaluator evaluator){
+            this.game = game;
+            this.depth = depth;
+            this.evaluator = evaluator;
         }
-        Player currentPlayer = game.getCurrentPlayer();
-        int lowestSeenValue = Integer.MAX_VALUE;
-        for (Tool tool : currentPlayer.getPieces()) {
-            Location src = tool.getSquare().getLocation();
-            for (Location dst : tool.getPossibleMoves()) {
-                copyOfGame = new Game(game);
-                MoveStatus moveStatus = copyOfGame.getMoveManager().makeMove(src, dst, game.getCurrentPlayer());
-                if (moveStatus.isDone()) {
-                    copyOfGame.switchTurn();
-                    final int currentValue = max(new Game(copyOfGame), depth - 1);
-                    if (currentValue <= lowestSeenValue) {
-                        lowestSeenValue = currentValue;
+
+        @Override
+        protected OptionalInt compute() {
+            if (depth == 0 || isEndGameScenario(game)) {
+                return OptionalInt.of(this.evaluator.evaluate(game, depth));
+            }
+            return ForkJoinTask.invokeAll(createSubtasks())
+                    .stream().map(ForkJoinTask::join).reduce((x, y) -> x.getAsInt() - y.getAsInt()  <= 0  ? x : y).get();
+        }
+
+        private Collection<RecursiveTask<OptionalInt>> createSubtasks() {
+            List<RecursiveTask<OptionalInt>> dividedTasks = new ArrayList<>();
+            Game copyOfGame;
+            Player currentPlayer = game.getCurrentPlayer();
+            for (Tool tool : currentPlayer.getPieces()) {
+                Location src = tool.getSquare().getLocation();
+                for (Location dst : tool.getPossibleMoves()) {
+                    copyOfGame = new Game(game);
+                    MoveStatus moveStatus = copyOfGame.getMoveManager().makeMove(src, dst, game.getCurrentPlayer());
+                    if (moveStatus.isDone()) {
+                        copyOfGame.switchTurn();
+                        dividedTasks.add(new Max(new Game(copyOfGame), depth - 1,this.evaluator));
                     }
                 }
             }
-
+            return dividedTasks;
         }
-        return lowestSeenValue;
     }
 
-    private int max(final Game game,
-                    final int depth) {
-        Game copyOfGame;
-        if (depth == 0 || isEndGameScenario(game)) {
-            return this.evaluator.evaluate(game, depth);
+    public class Max extends RecursiveTask<OptionalInt> {
+        final Game game;
+        final int depth;
+        final BoardEvaluator evaluator;
+
+        public Max(Game game,int depth,BoardEvaluator evaluator){
+            this.game = game;
+            this.depth = depth;
+            this.evaluator = evaluator;
         }
-        Player currentPlayer = game.getCurrentPlayer();
-        int highestSeenValue = Integer.MIN_VALUE;
-        for (Tool tool : currentPlayer.getPieces()) {
-            Location src = tool.getSquare().getLocation();
-            for (Location dst : tool.getPossibleMoves()) {
-                // todo - create an backup game - optimize
-                copyOfGame = new Game(game);
-                MoveStatus moveStatus = copyOfGame.getMoveManager().makeMove(src, dst, game.getCurrentPlayer());
-                if (moveStatus.isDone()) {
-                    copyOfGame.switchTurn();
-                    final int currentValue = min(new Game(copyOfGame), depth - 1);
-                    if (currentValue >= highestSeenValue) {
-                        highestSeenValue = currentValue;
+
+        @Override
+        protected OptionalInt compute() {
+            if (depth == 0 || isEndGameScenario(game)) {
+                return OptionalInt.of(this.evaluator.evaluate(game, depth));
+            }
+            return ForkJoinTask.invokeAll(createSubtasks())
+                    .stream().map(ForkJoinTask::join).reduce((x, y) -> x.getAsInt() - y.getAsInt()  >= 0  ? x : y).get();
+        }
+
+        private Collection<RecursiveTask<OptionalInt>> createSubtasks() {
+            List<RecursiveTask<OptionalInt>> dividedTasks = new ArrayList<>();
+            Game copyOfGame;
+            Player currentPlayer = game.getCurrentPlayer();
+            for (Tool tool : currentPlayer.getPieces()) {
+                Location src = tool.getSquare().getLocation();
+                for (Location dst : tool.getPossibleMoves()) {
+                    copyOfGame = new Game(game);
+                    MoveStatus moveStatus = copyOfGame.getMoveManager().makeMove(src, dst, game.getCurrentPlayer());
+                    if (moveStatus.isDone()) {
+                        copyOfGame.switchTurn();
+                        dividedTasks.add(new Min(new Game(copyOfGame), depth - 1,this.evaluator));
                     }
                 }
             }
+            return dividedTasks;
         }
-        return highestSeenValue;
     }
-
 }
 
